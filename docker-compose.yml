@@ -1,0 +1,23 @@
+services:
+  research-lab:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LAB_DATA_DIR: /data
+      LAB_HOST: 0.0.0.0
+      LAB_PORT: 8300
+    volumes:
+      - lab_data:/data
+    ports:
+      - "127.0.0.1:${LAB_PORT:-8300}:8300"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8300/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  lab_data:
