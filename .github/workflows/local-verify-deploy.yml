@@ -20,8 +20,8 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main')
-    runs-on: [self-hosted, linux, lab-local]
-    timeout-minutes: 60
+    runs-on: [self-hosted, linux, expert-local]
+    timeout-minutes: 90
 
     steps:
       - name: Choose trusted revision
@@ -51,29 +51,95 @@ jobs:
           .gha-venv/bin/python -m compileall -q src tests
           .gha-venv/bin/pytest -q
           cp .env.example .env.ci
+          docker network inspect home-lab >/dev/null 2>&1 || docker network create home-lab >/dev/null
           docker compose --env-file .env.ci config >/dev/null
           rm -f .env.ci
 
-      - name: Deploy tested main
+      - name: Bootstrap and deploy Research Lab
         if: github.event_name == 'workflow_run'
         shell: bash
         env:
           DEPLOY_DIR: /home/stoicpawn/projects/research_lab
         run: |
           set -euo pipefail
-          test -d "$DEPLOY_DIR/.git"
-          test -f "$DEPLOY_DIR/.env"
+          mkdir -p /home/stoicpawn/projects
+
+          if [ ! -d "$DEPLOY_DIR/.git" ]; then
+            git clone https://github.com/StoicPawn/research_lab.git "$DEPLOY_DIR"
+          fi
+
           if [ -n "$(git -C "$DEPLOY_DIR" status --porcelain --untracked-files=no)" ]; then
-            echo "Production checkout has tracked local changes; refusing to overwrite them."
+            echo "Research Lab production checkout has tracked local changes; refusing to overwrite them."
             git -C "$DEPLOY_DIR" status --short
             exit 1
           fi
+
           git -C "$DEPLOY_DIR" fetch origin main
           git -C "$DEPLOY_DIR" checkout main
           git -C "$DEPLOY_DIR" reset --hard "${{ steps.rev.outputs.sha }}"
+
           cd "$DEPLOY_DIR"
-          docker network inspect home-lab >/dev/null 2>&1 || docker network create home-lab
+          if [ ! -f .env ]; then
+            cp .env.example .env
+            TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+            sed -i "s#^LAB_API_TOKEN=.*#LAB_API_TOKEN=${TOKEN}#" .env
+          fi
+
+          docker network inspect home-lab >/dev/null 2>&1 || docker network create home-lab >/dev/null
           docker compose --env-file .env up -d --build --remove-orphans
+
+      - name: Wire Lab into Expert and Tutor
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          LAB_DIR: /home/stoicpawn/projects/research_lab
+          EXPERT_ENV: /home/stoicpawn/projects/expert_my_rules/.env
+          TUTOR_ENV: /home/stoicpawn/projects/tutor_llm/deploy/.env
+        run: |
+          set -euo pipefail
+          TOKEN="$(awk -F= '$1=="LAB_API_TOKEN" {print substr($0,index($0,"=")+1)}' "$LAB_DIR/.env" | tail -n1)"
+          test -n "$TOKEN"
+
+          set_env() {
+            FILE="$1"
+            KEY="$2"
+            VALUE="$3"
+            [ -f "$FILE" ] || return 0
+            if grep -q "^${KEY}=" "$FILE"; then
+              sed -i "s#^${KEY}=.*#${KEY}=${VALUE}#" "$FILE"
+            else
+              printf '\n%s=%s\n' "$KEY" "$VALUE" >> "$FILE"
+            fi
+          }
+
+          set_env "$EXPERT_ENV" RESEARCH_LAB_URL http://research-lab:8300
+          set_env "$EXPERT_ENV" RESEARCH_LAB_TOKEN "$TOKEN"
+          set_env "$TUTOR_ENV" RESEARCH_LAB_URL http://research-lab:8300
+          set_env "$TUTOR_ENV" RESEARCH_LAB_TOKEN "$TOKEN"
+
+          echo "Research Lab credentials wired into installed Expert/Tutor profiles."
+
+      - name: Refresh connected apps
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /home/stoicpawn/projects/expert_my_rules/.env ]; then
+            cd /home/stoicpawn/projects/expert_my_rules
+            MODE="$(awk -F= '$1=="AWB_INFERENCE_MODE" {print $2}' .env | tail -n1)"
+            MODE="${MODE:-local}"
+            if [ "$MODE" = "local" ]; then
+              docker compose --env-file .env --profile local-inference up -d --build --remove-orphans
+            else
+              docker compose --env-file .env up -d --build --remove-orphans
+            fi
+          fi
+
+          if [ -f /home/stoicpawn/projects/tutor_llm/deploy/.env ]; then
+            cd /home/stoicpawn/projects/tutor_llm/deploy
+            docker compose --env-file .env -f docker-compose.server.yml up -d --build --remove-orphans
+          fi
 
       - name: Health check
         if: github.event_name == 'workflow_run'
