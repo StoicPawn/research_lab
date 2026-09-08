@@ -42,9 +42,12 @@ jobs:
 
       - name: Verify on mini-PC
         shell: bash
+        env:
+          LAB_DATA_DIR: ${{ runner.temp }}/research-lab-data
         run: |
           set -euo pipefail
-          rm -rf .gha-venv
+          rm -rf "$LAB_DATA_DIR" .gha-venv
+          mkdir -p "$LAB_DATA_DIR"
           python3 -m venv .gha-venv
           .gha-venv/bin/python -m pip install --upgrade pip
           .gha-venv/bin/pip install -e ".[dev]"
