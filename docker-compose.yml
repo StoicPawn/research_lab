@@ -12,6 +12,8 @@ services:
       - lab_data:/data
     ports:
       - "127.0.0.1:${LAB_PORT:-8300}:8300"
+    networks:
+      - home-lab
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8300/health', timeout=3)"]
       interval: 15s
@@ -21,3 +23,8 @@ services:
 
 volumes:
   lab_data:
+
+networks:
+  home-lab:
+    external: true
+    name: home-lab
