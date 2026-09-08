@@ -72,6 +72,7 @@ jobs:
           git -C "$DEPLOY_DIR" checkout main
           git -C "$DEPLOY_DIR" reset --hard "${{ steps.rev.outputs.sha }}"
           cd "$DEPLOY_DIR"
+          docker network inspect home-lab >/dev/null 2>&1 || docker network create home-lab
           docker compose --env-file .env up -d --build --remove-orphans
 
       - name: Health check
