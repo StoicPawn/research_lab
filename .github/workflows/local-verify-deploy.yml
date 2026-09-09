@@ -59,7 +59,7 @@ jobs:
           docker compose --env-file .env config >/dev/null
           rm -f .env
 
-      - name: Bootstrap and deploy Research Lab
+      - name: Bootstrap and deploy Research Lab at an idle experiment boundary
         if: github.event_name == 'workflow_run'
         shell: bash
         env:
@@ -90,9 +90,32 @@ jobs:
           fi
 
           docker network inspect home-lab >/dev/null 2>&1 || docker network create home-lab >/dev/null
+
+          # Never kill an experiment that Expert My Rules or Tutor LLM is currently
+          # using. Existing Lab runs are resource-bounded, so wait for the child
+          # process to finish and only then replace the service container.
+          if [ -n "$(docker compose --env-file .env ps -q research-lab 2>/dev/null || true)" ]; then
+            ACTIVE=0
+            for _ in $(seq 1 180); do
+              ACTIVE="$(docker compose --env-file .env exec -T research-lab python -c 'from research_lab.processes import active_experiment_count; print(active_experiment_count())' 2>/dev/null || echo 0)"
+              ACTIVE="$(printf '%s' "$ACTIVE" | tail -n1 | tr -d '[:space:]')"
+              ACTIVE="${ACTIVE:-0}"
+              if [ "$ACTIVE" = "0" ]; then
+                echo "Research Lab is at an idle experiment boundary."
+                break
+              fi
+              echo "Research Lab still has ${ACTIVE} active experiment(s); waiting without interrupting them."
+              sleep 5
+            done
+            if [ "$ACTIVE" != "0" ]; then
+              echo "Timed out waiting for Research Lab to become idle; refusing a disruptive deploy."
+              exit 1
+            fi
+          fi
+
           docker compose --env-file .env up -d --build --remove-orphans
 
-      - name: Wire Lab into Expert and Tutor
+      - name: Wire Lab credentials for future safe caller restarts
         if: github.event_name == 'workflow_run'
         shell: bash
         env:
@@ -121,29 +144,8 @@ jobs:
           set_env "$TUTOR_ENV" RESEARCH_LAB_URL http://research-lab:8300
           set_env "$TUTOR_ENV" RESEARCH_LAB_TOKEN "$TOKEN"
 
-          echo "Research Lab credentials wired into installed Expert/Tutor profiles."
-
-      - name: Refresh connected apps
-        if: github.event_name == 'workflow_run'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f /home/stoicpawn/projects/expert_my_rules/.env ]; then
-            cd /home/stoicpawn/projects/expert_my_rules
-            MODE="$(awk -F= '$1=="AWB_INFERENCE_MODE" {print $2}' .env | tail -n1)"
-            MODE="${MODE:-local}"
-            if [ "$MODE" = "local" ]; then
-              docker compose --env-file .env --profile local-inference up -d --build --remove-orphans
-            else
-              docker compose --env-file .env up -d --build --remove-orphans
-            fi
-          fi
-
-          if [ -f /home/stoicpawn/projects/tutor_llm/deploy/.env ]; then
-            cd /home/stoicpawn/projects/tutor_llm/deploy
-            docker compose --env-file .env -f docker-compose.server.yml up -d --build --remove-orphans
-          fi
+          echo "Research Lab credentials are staged in caller .env files."
+          echo "Connected applications are deliberately NOT restarted here; each project deploys on its own safe policy."
 
       - name: Health check
         if: github.event_name == 'workflow_run'
